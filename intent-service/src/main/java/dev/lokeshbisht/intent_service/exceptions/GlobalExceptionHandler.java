@@ -36,6 +36,12 @@ public class GlobalExceptionHandler {
         return Mono.just(ResponseEntity.status(HttpStatus.FORBIDDEN.value()).body(errorResponseDto));
     }
 
+    @ExceptionHandler(IntentServiceException.class)
+    public Mono<ResponseEntity<ErrorResponseDto>> handleIntentServiceException(IntentServiceException ex) {
+        ErrorResponseDto errorResponseDto = new ErrorResponseDto(ex.getErrorCode(), ex.getMessage());
+        return Mono.just(ResponseEntity.status(ex.getStatus()).body(errorResponseDto));
+    }
+
     @ExceptionHandler(HeaderValidationException.class )
     public Mono<ResponseEntity<ErrorResponseDto>> handleHeaderErrors(HeaderValidationException ex) {
         ErrorResponseDto errorResponseDto = new ErrorResponseDto(ex.getErrorCode(), ex.getMessage(), ex.getFieldValidationErrors());

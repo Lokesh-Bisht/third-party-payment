@@ -16,7 +16,11 @@ public class CommonConstants {
 
     public static final String HEADER_VALIDATION_FAILED_ERROR_MSG = "One or more headers are missing or have invalid values.";
 
+    public static final String INVALID_INTENT_ID_ERROR_MSG = "IntentId must be a valid UUID.";
+
     public static final String  INTERNAL_SERVER_ERROR_MSG = "An error occurred while creating the payment. Please, try again!";
+
+    public static final String INTENT_NOT_FOUND_MSG = "Payment intent not found.";
 
     public static final String INTENT_ALREADY_EXISTS_MEG = "A payment intent with the provided intent ID already exists.";
 

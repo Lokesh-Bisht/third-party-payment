@@ -2,9 +2,11 @@ package dev.lokeshbisht.intent_service.controller;
 
 import dev.lokeshbisht.intent_service.dto.request.CreateIntentRequest;
 import dev.lokeshbisht.intent_service.dto.response.CreateIntentResponse;
+import dev.lokeshbisht.intent_service.dto.response.IntentResponse;
 import dev.lokeshbisht.intent_service.service.PaymentIntentService;
 import dev.lokeshbisht.intent_service.utils.HeaderValidator;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -37,7 +39,7 @@ public class PaymentIntentController {
         @Valid @RequestBody CreateIntentRequest createIntentRequest
     ) {
         logger.info("Received request to create intent for idempotencyKey={} psuId={}", createIntentRequest.getIdempotencyKey(), psuId);
-        headerValidator.validateCreateIntentHeaders(psuId);
+        headerValidator.validatePsuIdHeader(psuId);
         createIntentRequest.setPsuId(UUID.fromString(psuId));
         return paymentIntentService.createPaymentIntent(createIntentRequest)
             .map(response -> {
@@ -46,5 +48,18 @@ public class PaymentIntentController {
                 }
                 return ResponseEntity.status(HttpStatus.CREATED).body(response);
             });
+    }
+
+    @GetMapping("/intent/{intentId}")
+    public Mono<ResponseEntity<IntentResponse>> getIntent(
+        @RequestHeader(name = "Content-Type") String contentType,
+        @RequestHeader(required = false, name = "x-psu-id") String psuId,
+        @PathVariable(name = "intentId") @NotBlank String intentId
+    ) {
+        logger.info("Received request to fetch intent for intentId={}, and psuId={}", intentId,  psuId);
+        headerValidator.validatePsuIdHeader(psuId);
+        headerValidator.validateIntentId(intentId);
+        return paymentIntentService.getPaymentIntent(UUID.fromString(intentId), UUID.fromString(psuId))
+            .map(response -> ResponseEntity.status(HttpStatus.OK).body(response));
     }
 }
