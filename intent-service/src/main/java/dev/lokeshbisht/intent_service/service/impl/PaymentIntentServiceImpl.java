@@ -5,11 +5,13 @@ import dev.lokeshbisht.intent_service.dto.request.CreateIntentRequest;
 import dev.lokeshbisht.intent_service.dto.request.ImmediatePaymentDetails;
 import dev.lokeshbisht.intent_service.dto.request.PaymentDetails;
 import dev.lokeshbisht.intent_service.dto.response.CreateIntentResponse;
+import dev.lokeshbisht.intent_service.dto.response.IntentResponse;
 import dev.lokeshbisht.intent_service.entity.PaymentIntent;
 import dev.lokeshbisht.intent_service.entity.PaymentIntentStatus;
 import dev.lokeshbisht.intent_service.enums.ErrorCodes;
 import dev.lokeshbisht.intent_service.exceptions.DuplicateResourceException;
 import dev.lokeshbisht.intent_service.exceptions.ForbiddenException;
+import dev.lokeshbisht.intent_service.exceptions.IntentServiceException;
 import dev.lokeshbisht.intent_service.exceptions.InternalServerErrorException;
 import dev.lokeshbisht.intent_service.repository.IntentRepository;
 import dev.lokeshbisht.intent_service.repository.IntentStatusRepository;
@@ -22,6 +24,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.reactive.TransactionalOperator;
 import reactor.core.publisher.Flux;
@@ -33,8 +36,9 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static dev.lokeshbisht.intent_service.constants.CommonConstants.CREATE_INTENT_CODE;
-import static dev.lokeshbisht.intent_service.constants.CommonConstants.CREATE_INTENT_REASON_CODE;
+import static dev.lokeshbisht.intent_service.constants.CommonConstants.*;
+import static dev.lokeshbisht.intent_service.enums.ErrorCodes.INT_SER_FORBIDDEN;
+import static dev.lokeshbisht.intent_service.enums.ErrorCodes.INT_SER_INTENT_NOT_FOUND;
 
 @Service
 @RequiredArgsConstructor
@@ -101,6 +105,36 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
                             return dbFallbackCreate(idempotencyKey, createIntentRequest);
                         });
                 }
+            });
+    }
+
+    @Override
+    public Mono<IntentResponse> getPaymentIntent(UUID intentId, UUID psuId) {
+        logger.info("Begin - getPaymentIntent for intentId: {} and psuId: {}", intentId, psuId);
+        return intentRepository.findByIntentId(intentId)
+            .switchIfEmpty(
+                Mono.error(new IntentServiceException(HttpStatus.NOT_FOUND, INT_SER_INTENT_NOT_FOUND, INTENT_NOT_FOUND_MSG))
+            )
+            .flatMap(paymentIntent -> {
+
+                // Intent Exists but Belongs to Different PSU
+                if (!psuId.equals(paymentIntent.getPsuId())) {
+                    return Mono.error(new ForbiddenException(INT_SER_FORBIDDEN, INTENT_ACCESS_FORBIDDEN_MSG));
+                }
+
+                IntentTypeProcessor<?> processor = intentTypeProcessorRegistry.resolve(paymentIntent.getPaymentType());
+
+                Mono<? extends PaymentDetails> paymentDetailsMono = processor.getPaymentIntentDetails(intentId);
+
+                Mono<PaymentIntentStatus> paymentIntentStatusMono = intentStatusRepository.findLatestStatus(intentId);
+
+                return Mono.zip(paymentDetailsMono, paymentIntentStatusMono)
+                    .map(tuple -> {
+                        PaymentDetails paymentDetails = tuple.getT1();
+                        PaymentIntentStatus paymentIntentStatus = tuple.getT2();
+
+                        return utilService.mapToIntentResponse(paymentIntent, paymentIntentStatus, paymentDetails);
+                    });
             });
     }
 
@@ -179,7 +213,7 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
         return intentRepository.findByIdempotencyKeyAndPsuId(idempotencyKey, psuId)
             .flatMap(intent ->
                 intentStatusRepository.findLatestStatus(intent.getIntentId())
-                    .map(utilService::mapToIntentResponse)
+                    .map(utilService::mapToCreateIntentResponse)
             )
             .flatMap(response -> {
                 response.setIsConflicted(true);
@@ -217,11 +251,11 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
                             intent.getIntentId(), createIntentRequest.getStatus(), statusReasonCode
                         );
 
-                        IntentTypeProcessor processor = intentTypeProcessorRegistry.resolve(createIntentRequest.getPaymentType());
+                        IntentTypeProcessor<?> processor = intentTypeProcessorRegistry.resolve(createIntentRequest.getPaymentType());
 
                         return processor.processPostCreation(createIntentRequest, getIntentRequestJson(createIntentRequest))
                             .then(intentStatusRepository.save(intentStatus))
-                            .map(utilService::mapToIntentResponse)
+                            .map(utilService::mapToCreateIntentResponse)
                             .doOnNext(response -> {
                                 response.setIsConflicted(false);
                                 logger.info("Successfully created a new intent record.");
@@ -238,7 +272,7 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
 
         return intentRepository.findByIntentId(intentId)
             .flatMap(existingIntent -> intentStatusRepository.findLatestStatus(intentId)
-                .map(utilService::mapToIntentResponse)
+                .map(utilService::mapToCreateIntentResponse)
                 .flatMap(response -> {
                     response.setIsConflicted(true);
                     return Mono.just(response);

@@ -17,4 +17,6 @@ public interface ImmediatePaymentIntentDetailsRepository extends ReactiveCrudRep
         VALUES (:intentId, CAST(:paymentDetails AS jsonb))
     """)
     Mono<Void> saveJson(UUID intentId, String paymentDetails);
+
+    Mono<ImmediatePaymentIntentDetails> findByIntentId(UUID intentId);
 }
