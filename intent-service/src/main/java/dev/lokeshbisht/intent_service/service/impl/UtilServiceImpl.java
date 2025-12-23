@@ -1,18 +1,18 @@
 package dev.lokeshbisht.intent_service.service.impl;
 
 import dev.lokeshbisht.intent_service.dto.request.PaymentDetails;
+import dev.lokeshbisht.intent_service.dto.request.StatusReasonRequestDto;
 import dev.lokeshbisht.intent_service.dto.response.CreateIntentResponse;
 import dev.lokeshbisht.intent_service.dto.response.IntentResponse;
-import dev.lokeshbisht.intent_service.entity.ImmediatePaymentIntentDetails;
 import dev.lokeshbisht.intent_service.entity.PaymentIntent;
 import dev.lokeshbisht.intent_service.entity.PaymentIntentStatus;
 import dev.lokeshbisht.intent_service.enums.IntentStatus;
 import dev.lokeshbisht.intent_service.service.UtilService;
 import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 
-import java.io.File;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
@@ -62,8 +62,17 @@ public class UtilServiceImpl implements UtilService {
     }
 
     // DB-specific unique constraint detection — adapt for your DB / R2DBC driver
+    @Override
     public boolean isUniqueConstraintViolation(Throwable t) {
         String msg = t.getMessage() == null ? "" : t.getMessage().toLowerCase();
         return msg.contains("unique") || msg.contains("duplicate") || msg.contains("constraint");
+    }
+
+    @Override
+    public String fetchStatusReasonCodeForStatus(StatusReasonRequestDto statusReasonRequestDto) {
+        if (StringUtils.isNotBlank(statusReasonRequestDto.getIsoCode()) && StringUtils.isNotBlank(statusReasonRequestDto.getServiceCode())) {
+            return statusReasonRequestDto.getIsoCode() + "|" + statusReasonRequestDto.getServiceCode();
+        }
+        return "";
     }
 }

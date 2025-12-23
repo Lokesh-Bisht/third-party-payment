@@ -3,7 +3,10 @@ package dev.lokeshbisht.intent_service.exceptions;
 import dev.lokeshbisht.intent_service.dto.response.ErrorResponseDto;
 import dev.lokeshbisht.intent_service.dto.response.FieldValidationError;
 import dev.lokeshbisht.intent_service.enums.ErrorCodes;
+import dev.lokeshbisht.intent_service.enums.IntentStatus;
+import dev.lokeshbisht.intent_service.enums.PaymentType;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.codec.DecodingException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -11,8 +14,13 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.exc.InvalidFormatException;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 @Slf4j
 @RestControllerAdvice
@@ -48,12 +56,6 @@ public class GlobalExceptionHandler {
         return Mono.just(ResponseEntity.badRequest().body(errorResponseDto));
     }
 
-    @ExceptionHandler(ServerWebInputException.class)
-    public Mono<ResponseEntity<ErrorResponseDto>> handleServerWebInputException(ServerWebInputException ex) {
-        ErrorResponseDto errorResponseDto = new ErrorResponseDto(ErrorCodes.MALFORMED_REQUEST_BODY, "Request body is malformed or contains invalid data");
-        return Mono.just(ResponseEntity.badRequest().body(errorResponseDto));
-    }
-
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public Mono<ResponseEntity<ErrorResponseDto>> handleMethodArgumentNotValidException(MethodArgumentNotValidException ex) {
         List<FieldValidationError> fieldErrors = ex.getBindingResult()
@@ -65,6 +67,33 @@ public class GlobalExceptionHandler {
         log.error("Validation failed. Errors: {}", fieldErrors);
         ErrorResponseDto errorResponseDto = new ErrorResponseDto(ErrorCodes.INT_SER_BAD_REQUEST, "Validation failed", fieldErrors);
         return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST.value()).body(errorResponseDto));
+    }
+
+    @ExceptionHandler(ServerWebInputException.class)
+    public Mono<ResponseEntity<ErrorResponseDto>> handleServerWebInputException(ServerWebInputException ex) {
+        List<FieldValidationError> errors = new ArrayList<>();
+
+        Throwable cause = ex.getCause();
+        log.error("Error: {}", ex.getMessage(), ex);
+        if (cause instanceof DecodingException decodingEx && decodingEx.getCause() instanceof InvalidFormatException ife) {
+            String fieldName = ife.getPath().stream()
+                .map(JacksonException.Reference::getPropertyName)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse("unknown");
+            if (fieldName.contains("status")) {
+                errors.add(new FieldValidationError("status", "Invalid value. Allowed: " + Arrays.toString(IntentStatus.values())));
+            } else if (fieldName.contains("paymentType")) {
+                errors.add(new FieldValidationError("paymentType", "Invalid value. Allowed: " + Arrays.toString(PaymentType.values())));
+            } else {
+                errors.add(new FieldValidationError(fieldName, "Invalid enum value in request body"));
+            }
+        } else {
+            errors.add(new FieldValidationError("error", "Invalid request payload"));
+        }
+
+        ErrorResponseDto errorResponseDto = new ErrorResponseDto(ErrorCodes.INT_SER_BAD_REQUEST, "Validation failed", errors);
+        return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponseDto));
     }
 
     @ExceptionHandler(Exception.class)
