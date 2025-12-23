@@ -17,7 +17,7 @@ CREATE TABLE payment_intent (
 
 CREATE TABLE payment_intent_status (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  intent_id UUID NOT NULL UNIQUE,
+  intent_id UUID NOT NULL,
   status VARCHAR(30) NOT NULL,
   status_reason_code VARCHAR(200),
   created_at timestamptz NOT NULL DEFAULT now(),
