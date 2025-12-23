@@ -1,12 +1,12 @@
 package dev.lokeshbisht.intent_service.controller;
 
 import dev.lokeshbisht.intent_service.dto.request.CreateIntentRequest;
+import dev.lokeshbisht.intent_service.dto.request.UpdateIntentStatusRequest;
 import dev.lokeshbisht.intent_service.dto.response.CreateIntentResponse;
 import dev.lokeshbisht.intent_service.dto.response.IntentResponse;
 import dev.lokeshbisht.intent_service.service.PaymentIntentService;
 import dev.lokeshbisht.intent_service.utils.HeaderValidator;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -54,12 +54,27 @@ public class PaymentIntentController {
     public Mono<ResponseEntity<IntentResponse>> getIntent(
         @RequestHeader(name = "Content-Type") String contentType,
         @RequestHeader(required = false, name = "x-psu-id") String psuId,
-        @PathVariable(name = "intentId") @NotBlank String intentId
+        @PathVariable(name = "intentId") String intentId
     ) {
         logger.info("Received request to fetch intent for intentId={}, and psuId={}", intentId,  psuId);
         headerValidator.validatePsuIdHeader(psuId);
         headerValidator.validateIntentId(intentId);
         return paymentIntentService.getPaymentIntent(UUID.fromString(intentId), UUID.fromString(psuId))
+            .map(response -> ResponseEntity.status(HttpStatus.OK).body(response));
+    }
+
+    @PatchMapping("/intent/{intentId}/status")
+    public Mono<ResponseEntity<IntentResponse>> updateIntentStatus(
+        @RequestHeader(name = "Content-Type") String contentType,
+        @RequestHeader(required = false, name = "x-psu-id") String psuId,
+        @PathVariable(name = "intentId") String intentId,
+        @Valid @RequestBody UpdateIntentStatusRequest updateIntentStatusRequest
+    ) {
+        logger.info("Received request to update intent status to intent_status: {}, for intentId={}, and psuId={}",
+            updateIntentStatusRequest, intentId,  psuId);
+        headerValidator.validatePsuIdHeader(psuId);
+        headerValidator.validateIntentId(intentId);
+        return paymentIntentService.updatePaymentIntentStatus(UUID.fromString(intentId), UUID.fromString(psuId), updateIntentStatusRequest)
             .map(response -> ResponseEntity.status(HttpStatus.OK).body(response));
     }
 }

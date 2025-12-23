@@ -1,14 +1,13 @@
 package dev.lokeshbisht.intent_service.service.impl;
 
 import dev.lokeshbisht.intent_service.constants.CommonConstants;
-import dev.lokeshbisht.intent_service.dto.request.CreateIntentRequest;
-import dev.lokeshbisht.intent_service.dto.request.ImmediatePaymentDetails;
-import dev.lokeshbisht.intent_service.dto.request.PaymentDetails;
+import dev.lokeshbisht.intent_service.dto.request.*;
 import dev.lokeshbisht.intent_service.dto.response.CreateIntentResponse;
 import dev.lokeshbisht.intent_service.dto.response.IntentResponse;
 import dev.lokeshbisht.intent_service.entity.PaymentIntent;
 import dev.lokeshbisht.intent_service.entity.PaymentIntentStatus;
 import dev.lokeshbisht.intent_service.enums.ErrorCodes;
+import dev.lokeshbisht.intent_service.enums.IntentStatus;
 import dev.lokeshbisht.intent_service.exceptions.DuplicateResourceException;
 import dev.lokeshbisht.intent_service.exceptions.ForbiddenException;
 import dev.lokeshbisht.intent_service.exceptions.IntentServiceException;
@@ -23,7 +22,6 @@ import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
-import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.reactive.TransactionalOperator;
@@ -34,17 +32,17 @@ import tools.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static dev.lokeshbisht.intent_service.constants.CommonConstants.*;
-import static dev.lokeshbisht.intent_service.enums.ErrorCodes.INT_SER_FORBIDDEN;
-import static dev.lokeshbisht.intent_service.enums.ErrorCodes.INT_SER_INTENT_NOT_FOUND;
+import static dev.lokeshbisht.intent_service.enums.ErrorCodes.*;
 
 @Service
 @RequiredArgsConstructor
 public class PaymentIntentServiceImpl implements PaymentIntentService {
 
     private final UtilService utilService;
+
+    private final RedisDistributedLockService redisLockService;
 
     private final IntentRepository intentRepository;
 
@@ -56,13 +54,11 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
 
     private final ObjectMapper objectMapper;
 
-    private final ReactiveStringRedisTemplate lockRedisTemplate;
-
     private final ReactiveRedisTemplate<String, CreateIntentResponse> reactiveRedisTemplate;
 
     private static final Duration IDEMPOTENCY_TTL = Duration.ofMinutes(10);
 
-    private static final Duration LOCK_EXPIRY = Duration.ofSeconds(1000);
+    private static final Duration LOCK_EXPIRY = Duration.ofSeconds(10);
 
     private static final Duration LOCK_WAIT_RETRY = Duration.ofMillis(200);
 
@@ -79,22 +75,13 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
         final String lockKey = "idem_psuId:intent:lock:" + idempotencyKey + ':' + psuId;
         final String cacheKey = "idem_psuId:intent:key:" + idempotencyKey + ':' + psuId;
 
-        final String lockOwner = UUID.randomUUID().toString();
-        final AtomicBoolean lockAcquired = new AtomicBoolean(false);
-
-        return lockRedisTemplate.opsForValue()
-            .setIfAbsent(lockKey, lockOwner, LOCK_EXPIRY)
-            .onErrorResume(e -> {
-                logger.warn("Redis lock acquisition error for {}: {}", lockKey, e.toString());
-                return Mono.just(false);
-            })
+        return redisLockService.acquire(lockKey, LOCK_EXPIRY)
             .flatMap(acquired -> {
                 if (Boolean.TRUE.equals(acquired)) {
-                    lockAcquired.set(true);
                     logger.info("Lock acquired for lockKey={}", lockKey);
                     // Winner path: try cache->db->create
                     return handleCreateOrFetch(cacheKey, idempotencyKey, createIntentRequest)
-                        .flatMap(response -> releaseLock(lockKey).thenReturn(response));
+                        .flatMap(response -> redisLockService.release(lockKey).thenReturn(response));
                 } else {
                     logger.info("Lock not acquired for lockKey={}, entering wait path", lockKey);
                     // Loser path: wait briefly + poll cache/db for result
@@ -135,6 +122,22 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
 
                         return utilService.mapToIntentResponse(paymentIntent, paymentIntentStatus, paymentDetails);
                     });
+            });
+    }
+
+    @Override
+    public Mono<IntentResponse> updatePaymentIntentStatus(UUID intentId, UUID psuId, UpdateIntentStatusRequest updateIntentStatusRequest) {
+        logger.info("Begin - updatePaymentIntentStatus.");
+
+        final String lockKey = "update_intent:psuId:intent:lock:" + psuId + ':' + intentId;
+
+        return redisLockService.acquire(lockKey, LOCK_EXPIRY)
+            .flatMap(acquired -> {
+                if (!acquired) {
+                    return Mono.error(new IntentServiceException(HttpStatus.CONFLICT, INT_SER_FORBIDDEN, "a"));
+                }
+                return updatePaymentIntentStatusInternal(intentId, psuId, updateIntentStatusRequest.getIntentStatus(), updateIntentStatusRequest.getStatusReasonRequestDto())
+                    .doFinally(signal -> redisLockService.release(lockKey).subscribe());
             });
     }
 
@@ -280,10 +283,6 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
             );
     }
 
-    private Mono<Void> releaseLock(String lockKey) {
-        return lockRedisTemplate.delete(lockKey).then();
-    }
-
     private Mono<PaymentIntent> createPaymentIntentEntity(CreateIntentRequest createIntentRequest) {
         PaymentIntent paymentIntent = PaymentIntent.builder()
             .intentId(createIntentRequest.getIntentId())
@@ -314,4 +313,60 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
         return objectMapper.writeValueAsString(request.getPaymentDetails());
     }
 
+    private Mono<IntentResponse> updatePaymentIntentStatusInternal(UUID intentId, UUID psuId, IntentStatus targetStatus, StatusReasonRequestDto statusReasonRequestDto) {
+        return intentRepository.findByIntentId(intentId)
+            .switchIfEmpty(Mono.error(
+                new IntentServiceException(HttpStatus.NOT_FOUND, INT_SER_INTENT_NOT_FOUND, INTENT_NOT_FOUND_MSG)
+            ))
+            .flatMap(paymentIntent -> {
+
+                // PSU Validation -> intentId is valid but exists for a different PSU
+                if (!psuId.equals(paymentIntent.getPsuId())) {
+                    return Mono.error(
+                        new ForbiddenException(INT_SER_FORBIDDEN, INTENT_ACCESS_FORBIDDEN_MSG)
+                    );
+                }
+
+                IntentTypeProcessor<?> processor = intentTypeProcessorRegistry.resolve(paymentIntent.getPaymentType());
+
+                Mono<? extends PaymentDetails> paymentDetailsMono = processor.getPaymentIntentDetails(intentId);
+
+                Mono<PaymentIntentStatus> paymentIntentStatusMono = intentStatusRepository.findLatestStatus(intentId);
+
+                return Mono.zip(paymentDetailsMono, paymentIntentStatusMono)
+                    .flatMap(tuple -> {
+                        PaymentDetails paymentDetails = tuple.getT1();
+                        PaymentIntentStatus paymentIntentStatus = tuple.getT2();
+                        IntentStatus currentStatus = paymentIntentStatus.getStatus();
+
+                        if (currentStatus == targetStatus) {
+                            return Mono.just(utilService.mapToIntentResponse(paymentIntent, paymentIntentStatus, paymentDetails));
+                        }
+
+                        // The current status of the intent is a terminal status
+                        if (currentStatus.equals(IntentStatus.CONSENT_VERIFIED) || currentStatus.equals(IntentStatus.REJECTED)) {
+                            return Mono.error(new IntentServiceException(HttpStatus.CONFLICT, INT_SER_INTENT_ALREADY_FINALIZED, INTENT_INVALID_STATUS_TRANSITION));
+                        }
+
+                        if (!currentStatus.canTransitionTo(targetStatus)) {
+                            return Mono.error(new IntentServiceException(HttpStatus.CONFLICT, INT_SER_INVALID_STATUS_TRANSITION, INTENT_INVALID_STATUS_TRANSITION));
+                        }
+
+                        String statusReasonCode = utilService.fetchStatusReasonCodeForStatus(statusReasonRequestDto);
+
+                        // Persist new intent status record
+                        PaymentIntentStatus newStatus = utilService.createPaymentIntentStatus(
+                            paymentIntent.getIntentId(),
+                            targetStatus,
+                            statusReasonCode
+                            );
+
+                        return  intentStatusRepository.save(newStatus)
+                            .doOnSuccess(v -> logger.info("Successfully updated the payment intent status."))
+                            .thenReturn(
+                                utilService.mapToIntentResponse(paymentIntent, newStatus, paymentDetails)
+                            );
+                    });
+            });
+    }
 }
