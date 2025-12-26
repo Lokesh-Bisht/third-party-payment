@@ -1,6 +1,5 @@
-package dev.lokeshbisht.intent_service.service.impl;
+package dev.lokeshbisht.intent_service.service.lock;
 
-import dev.lokeshbisht.intent_service.service.DistributedLockService;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

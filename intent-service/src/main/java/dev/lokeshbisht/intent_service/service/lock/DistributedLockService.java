@@ -1,4 +1,4 @@
-package dev.lokeshbisht.intent_service.service;
+package dev.lokeshbisht.intent_service.service.lock;
 
 import reactor.core.publisher.Mono;
 

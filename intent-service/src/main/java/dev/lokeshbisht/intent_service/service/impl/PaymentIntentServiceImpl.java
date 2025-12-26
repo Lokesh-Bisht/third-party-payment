@@ -18,6 +18,7 @@ import dev.lokeshbisht.intent_service.service.PaymentIntentService;
 import dev.lokeshbisht.intent_service.service.UtilService;
 import dev.lokeshbisht.intent_service.service.intent.IntentTypeProcessor;
 import dev.lokeshbisht.intent_service.service.intent.IntentTypeProcessorRegistry;
+import dev.lokeshbisht.intent_service.service.lock.RedisDistributedLockService;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
