@@ -12,6 +12,6 @@ import java.util.UUID;
 public interface IntentStatusRepository extends ReactiveCrudRepository<PaymentIntentStatus, UUID> {
 
     @Query("SELECT * FROM payment_intent_status WHERE intent_id = :intentId " +
-        "ORDER BY created_at DESC LIMIT 1")
+        "ORDER BY fencing_token DESC LIMIT 1")
     Mono<PaymentIntentStatus> findLatestStatus(UUID intentId);
 }

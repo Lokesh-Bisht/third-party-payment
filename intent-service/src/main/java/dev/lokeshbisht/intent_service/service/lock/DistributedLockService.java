@@ -6,7 +6,7 @@ import java.time.Duration;
 
 public interface DistributedLockService {
 
-    Mono<Boolean> acquire(String lockKey, Duration ttl);
+    Mono<LockToken> acquire(String lockKey, Duration ttl, Duration maxWait);
 
-    Mono<Void> release(String lockKey);
+    Mono<Void> release(LockToken lockToken);
 }

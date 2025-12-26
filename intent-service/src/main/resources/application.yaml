@@ -23,6 +23,15 @@ logging:
   level:
     root: INFO
 
+lock:
+  intent-status:
+    ttl: ${LOCK_INTENT_STATUS_TTL}
+    max-wait: ${LOCK_INTENT_STATUS_MAX_WAIT}
+    retry:
+      max-attempts: ${LOCK_INTENT_STATUS_MAX_ATTEMPTS}
+      min-backoff: ${LOCK_INTENT_STATUS_MIN_BACKOFF}
+      max-backoff: ${LOCK_INTENT_STATUS_MAX_BACKOFF}
+
 ---
 spring:
   config:
