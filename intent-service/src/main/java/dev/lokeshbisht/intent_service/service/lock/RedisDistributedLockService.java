@@ -4,7 +4,6 @@ import dev.lokeshbisht.intent_service.exceptions.LockBusyException;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
@@ -19,16 +18,9 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class RedisDistributedLockService implements DistributedLockService {
 
-    @Value("${lock.intent-status.retry.min-backoff}")
-    private Duration minBackoff;
-
-    @Value("${lock.intent-status.retry.max-attempts}")
-    private int maxAttempts;
-
-    @Value("${lock.intent-status.retry.max-backoff}")
-    private Duration maxBackoff;
-
     private final ReactiveStringRedisTemplate lockRedisTemplate;
+
+    private final IntentStatusLockRetryProperties lockRetryProps;
 
     private static final Logger logger = LoggerFactory.getLogger(RedisDistributedLockService.class);
 
@@ -63,8 +55,8 @@ public class RedisDistributedLockService implements DistributedLockService {
                 })
             ))
             .retryWhen(
-                Retry.backoff(maxAttempts, minBackoff)
-                    .maxBackoff(maxBackoff)
+                Retry.backoff(lockRetryProps.getMaxAttempts(), lockRetryProps.getMinBackoff())
+                    .maxBackoff(lockRetryProps.getMaxBackoff())
                     .filter(LockBusyException.class::isInstance)  // Retry only on lock busy
             )
             .timeout(maxWait)
