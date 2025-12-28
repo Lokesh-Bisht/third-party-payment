@@ -23,11 +23,12 @@ public class UtilServiceImpl implements UtilService {
     private ObjectMapper objectMapper;
 
     @Override
-    public PaymentIntentStatus createPaymentIntentStatus(UUID intentId, IntentStatus status, String statusReasonCode) {
+    public PaymentIntentStatus createPaymentIntentStatus(UUID intentId, IntentStatus status, String statusReasonCode, long fencingToken) {
         return PaymentIntentStatus.builder()
             .intentId(intentId)
             .status(status)
             .statusReasonCode(statusReasonCode)
+            .fencingToken(fencingToken)
             .createdAt(OffsetDateTime.now())
             .build();
     }

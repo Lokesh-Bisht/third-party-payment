@@ -35,6 +35,9 @@ public class PaymentIntentStatus {
     @Column("status_reason_code")
     private String statusReasonCode;
 
+    @Column("fencing_token")
+    private long fencingToken;
+
     @Column("created_at")
     private OffsetDateTime createdAt;
 }

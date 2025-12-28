@@ -12,7 +12,7 @@ import java.util.UUID;
 
 public interface UtilService {
 
-    PaymentIntentStatus createPaymentIntentStatus(UUID intentId, IntentStatus status, String statusReasonCode);
+    PaymentIntentStatus createPaymentIntentStatus(UUID intentId, IntentStatus status, String statusReasonCode, long fencingToken);
 
     CreateIntentResponse mapToCreateIntentResponse(PaymentIntentStatus paymentIntentStatus);
 
