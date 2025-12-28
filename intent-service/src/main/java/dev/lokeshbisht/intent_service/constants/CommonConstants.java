@@ -24,6 +24,12 @@ public class CommonConstants {
 
     public static final String INTENT_ALREADY_EXISTS_MEG = "A payment intent with the provided intent ID already exists.";
 
+    public static final String INTENT_STATUS_STALE_WRITE_MSG = "This payment was already updated. Please refresh to see the latest status.";
+
+    public static final String INTENT_STATUS_UPDATE_CONFLICT_MSG = "Payment cannot be updated in current state.";
+
+    public static final String INTENT_LOCK_BUSY_ERR_MSG = "Payment is being processed. Please try again.";
+
     public static final String INTENT_ACCESS_FORBIDDEN_MSG = "You are not authorized to access this payment intent.";
 
     public static final String INTENT_INVALID_STATUS_TRANSITION = "Invalid status transition";
