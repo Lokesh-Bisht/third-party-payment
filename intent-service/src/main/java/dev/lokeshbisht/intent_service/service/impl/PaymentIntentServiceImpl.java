@@ -18,6 +18,7 @@ import dev.lokeshbisht.intent_service.service.PaymentIntentService;
 import dev.lokeshbisht.intent_service.service.UtilService;
 import dev.lokeshbisht.intent_service.service.intent.IntentTypeProcessor;
 import dev.lokeshbisht.intent_service.service.intent.IntentTypeProcessorRegistry;
+import dev.lokeshbisht.intent_service.service.lock.IntentStatusLockProperties;
 import dev.lokeshbisht.intent_service.service.lock.RedisDistributedLockService;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
@@ -26,12 +27,9 @@ import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.reactive.TransactionalOperator;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tools.jackson.databind.ObjectMapper;
 
-import java.time.Duration;
-import java.util.Objects;
 import java.util.UUID;
 
 import static dev.lokeshbisht.intent_service.constants.CommonConstants.*;
@@ -45,6 +43,8 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
 
     private final RedisDistributedLockService redisLockService;
 
+    private final IntentStatusLockProperties lockProps;
+
     private final IntentRepository intentRepository;
 
     private final IntentStatusRepository intentStatusRepository;
@@ -57,43 +57,39 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
 
     private final ReactiveRedisTemplate<String, CreateIntentResponse> reactiveRedisTemplate;
 
-    private static final Duration IDEMPOTENCY_TTL = Duration.ofMinutes(10);
-
-    private static final Duration LOCK_EXPIRY = Duration.ofSeconds(10);
-
-    private static final Duration LOCK_WAIT_RETRY = Duration.ofMillis(200);
-
-    private static final int LOCK_WAIT_ATTEMPTS = 10;
-
     private static final Logger logger = LoggerFactory.getLogger(PaymentIntentServiceImpl.class);
 
     @Override
     public Mono<CreateIntentResponse> createPaymentIntent(CreateIntentRequest createIntentRequest) {
         UUID psuId = createIntentRequest.getPsuId();
+        UUID intentId = createIntentRequest.getIntentId();
         UUID idempotencyKey = createIntentRequest.getIdempotencyKey();
-        logger.info("Begin - createPaymentIntent for idempotencyKey: {} and psuId: {}", idempotencyKey, psuId);
+        logger.info("Begin - createPaymentIntent for intentId={} idempotencyKey={} and psuId={}", intentId, idempotencyKey, psuId);
 
-        final String lockKey = "idem_psuId:intent:lock:" + idempotencyKey + ':' + psuId;
-        final String cacheKey = "idem_psuId:intent:key:" + idempotencyKey + ':' + psuId;
+        final String lockKey = "lock:intent:create:" + intentId;
+        final String cacheKey = "idem_psuId:intent:key:" + idempotencyKey + ':' + psuId + ":" + intentId;
 
-        return redisLockService.acquire(lockKey, LOCK_EXPIRY)
-            .flatMap(acquired -> {
-                if (Boolean.TRUE.equals(acquired)) {
-                    logger.info("Lock acquired for lockKey={}", lockKey);
-                    // Winner path: try cache->db->create
-                    return handleCreateOrFetch(cacheKey, idempotencyKey, createIntentRequest)
-                        .flatMap(response -> redisLockService.release(lockKey).thenReturn(response));
-                } else {
-                    logger.info("Lock not acquired for lockKey={}, entering wait path", lockKey);
-                    // Loser path: wait briefly + poll cache/db for result
-                    return waitAndFetch(cacheKey, idempotencyKey, createIntentRequest.getPsuId())
-                        .onErrorResume(e -> {
-                            // If waiting failed (timeout), fallback to a safe DB-only create attempt
-                            logger.warn("Wait-and-fetch timed out for {}, attempting DB-check-create fallback", idempotencyKey);
-                            return dbFallbackCreate(idempotencyKey, createIntentRequest);
-                        });
-                }
-            });
+        return redisLockService.acquire(lockKey, lockProps.getTtl(), lockProps.getMaxWait())
+            .flatMap(lockToken -> {
+                // Winner path: try cache->db->create
+                logger.info("Lock acquired for intent={} lockKey={}, lockOwner={}, fencingToken={}",
+                    intentId,
+                    lockToken.lockKey(),
+                    lockToken.owner(),
+                    lockToken.fencingToken()
+                );
+
+                return handleCreateOrFetch(cacheKey, idempotencyKey, createIntentRequest)
+                    .doFinally(signal -> redisLockService.release(lockToken)
+                        .doOnError(e -> logger.error("Failed to release lock {}", lockToken.lockKey(), e))
+                        .subscribe());
+            })
+            .switchIfEmpty(Mono.defer(() -> {
+                // Loser path
+                logger.info("Lock not acquired for intent={}, performing idempotent fetch", intentId);
+                return fetchExistingRecord(createIntentRequest);
+            }));
+
     }
 
     @Override
@@ -145,15 +141,13 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
     private Mono<CreateIntentResponse> handleCreateOrFetch(String cacheKey, UUID idempotencyKey, CreateIntentRequest createIntentRequest) {
         // 1) Check if the intentId exists in cache
         Mono<CreateIntentResponse> cacheCheck = reactiveRedisTemplate.opsForValue().get(cacheKey)
-            .flatMap(intentResponse -> {
-                if (intentResponse == null) return Mono.empty();
-                intentResponse.setIsConflicted(true);
+            .map(intentResponse -> {
                 logger.info("Found the payment request in cache. CacheKey={}", cacheKey);
-                return Mono.just(intentResponse);
+                return intentResponse;
             })
             .onErrorResume(ex -> {
                 // Redis read failed -> log and continue (we will fallback to DB)
-                logger.error("Redis read failed for key {}: {}", cacheKey, ex.getMessage());
+                logger.error("Redis cache read failed for key {}: {}", cacheKey, ex.getMessage());
                 return Mono.empty();
             });
 
@@ -164,6 +158,7 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
         Mono<CreateIntentResponse> createNewIntent = createNewIntent(createIntentRequest)
             .onErrorResume(err -> {
                 if (utilService.isUniqueConstraintViolation(err)) {
+                    logger.info("Unique constraint detected for intentId={}, fetching existing record.", createIntentRequest.getIntentId());
                     return fetchExistingRecord(createIntentRequest);
                 }
                 logger.error("An error occurred while creating the intent entity.", err);
@@ -172,75 +167,41 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
 
         return cacheCheck
             .switchIfEmpty(dbCheck)
-            .switchIfEmpty(Mono.defer(() -> intentExistsForPsuCheck(createIntentRequest).then(createNewIntent)))
+            .switchIfEmpty(intentExistsForPsuCheck(createIntentRequest).then(createNewIntent))
             .flatMap(response -> cacheIntentResponse(cacheKey, response).thenReturn(response));
-    }
-
-    // Loser path: wait + poll cache/db
-    private Mono<CreateIntentResponse> waitAndFetch(String cacheKey, UUID idempotencyKey, UUID psuId) {
-        Mono<CreateIntentResponse> dbCheck = dbCheck(idempotencyKey, psuId);
-
-        // a single attempt to fetch from cache then DB
-        Mono<CreateIntentResponse> attempt = Mono.defer(() -> reactiveRedisTemplate.opsForValue().get(cacheKey)
-            .switchIfEmpty(dbCheck));
-
-        // Poll immediately, then every LOCK_WAIT_RETRY, up to LOCK_WAIT_ATTEMPTS times
-        return Flux.interval(Duration.ZERO, LOCK_WAIT_RETRY)
-            .take(LOCK_WAIT_ATTEMPTS)
-            .concatMap(tick -> attempt)               // run one attempt per tick
-            .filter(Objects::nonNull)    // filter out empties (Mono.empty => no emission)
-            .next()                                  // take first emitted item and convert to Mono
-            .switchIfEmpty(Mono.defer(() -> {
-                logger.error("Timeout waiting for intent creation.");
-                return Mono.error(new InternalServerErrorException(CommonConstants.INTERNAL_SERVER_ERROR_MSG));
-            }));
-    }
-
-    // Fallback when wait times out: perform safe DB-check-create (no lock)
-    private Mono<CreateIntentResponse> dbFallbackCreate(UUID idempotencyKey, CreateIntentRequest createIntentRequest) {
-
-        Mono<CreateIntentResponse> dbCheck = dbCheck(idempotencyKey, createIntentRequest.getPsuId());
-
-        Mono<CreateIntentResponse> createNewIntent = createNewIntent(createIntentRequest)
-            .onErrorResume(err -> {
-                if (utilService.isUniqueConstraintViolation(err)) {
-                    return fetchExistingRecord(createIntentRequest);
-                }
-                logger.error("An error occurred while creating the intent entity.", err);
-                return Mono.error(new InternalServerErrorException(CommonConstants.INTERNAL_SERVER_ERROR_MSG));
-            });
-
-        return dbCheck.switchIfEmpty(createNewIntent);
     }
 
     private Mono<CreateIntentResponse> dbCheck(UUID idempotencyKey, UUID psuId) {
         return intentRepository.findByIdempotencyKeyAndPsuId(idempotencyKey, psuId)
-            .flatMap(intent ->
-                intentStatusRepository.findLatestStatus(intent.getIntentId())
-                    .map(utilService::mapToCreateIntentResponse)
-            )
-            .flatMap(response -> {
-                response.setIsConflicted(true);
-                return Mono.just(response);
-            }).doOnNext(res -> logger.info("The idempotency key and psuId combination already exists in the database."));
+            .flatMap(existingPaymentIntent -> {
+                // Same intentId but different PSU.
+                if (!psuId.equals(existingPaymentIntent.getPsuId())) {
+                    return Mono.error(
+                        new ForbiddenException(ErrorCodes.INT_SER_FORBIDDEN, CommonConstants.INTENT_ACCESS_FORBIDDEN_MSG)
+                    );
+                }
+
+                return intentStatusRepository.findLatestStatus(existingPaymentIntent.getIntentId())
+                    .map(utilService::mapToCreateIntentResponse);
+            })
+            .doOnNext(res -> logger.info("The idempotency key and psuId combination already exists in the database."));
     }
 
     private Mono<Void> intentExistsForPsuCheck(CreateIntentRequest request) {
         return intentRepository.findByIntentId(request.getIntentId())
             .flatMap(existingPaymentIntent -> {
                 UUID psuId = request.getPsuId();
-                // Same intentId and PSU.
-                if (psuId.equals(existingPaymentIntent.getPsuId())) {
+
+                // Same intentId but different PSU.
+                if (!psuId.equals(existingPaymentIntent.getPsuId())) {
                     return Mono.error(
-                        new DuplicateResourceException(ErrorCodes.INT_SER_INTENT_ALREADY_EXISTS, CommonConstants.INTENT_ALREADY_EXISTS_MEG)
+                        new ForbiddenException(ErrorCodes.INT_SER_FORBIDDEN, CommonConstants.INTENT_ACCESS_FORBIDDEN_MSG)
                     );
                 }
 
-                // Same intentId but different PSU.
-                return Mono.error(
-                    new ForbiddenException(ErrorCodes.INT_SER_FORBIDDEN, CommonConstants.INTENT_ACCESS_FORBIDDEN_MSG)
-                );
-            }).then(); // completes successfully if intent does not exist
+                // Same intentId + same PSU → idempotent replay allowed
+                return Mono.empty();
+            });
     }
 
     private Mono<CreateIntentResponse> createNewIntent(CreateIntentRequest createIntentRequest) {
@@ -271,8 +232,6 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
 
     private Mono<CreateIntentResponse> fetchExistingRecord(CreateIntentRequest createIntentRequest) {
         UUID intentId = createIntentRequest.getIntentId();
-
-        logger.info("Unique constraint detected for intentId={}, fetching existing record.", intentId);
 
         return intentRepository.findByIntentId(intentId)
             .flatMap(existingIntent -> intentStatusRepository.findLatestStatus(intentId)
@@ -305,7 +264,7 @@ public class PaymentIntentServiceImpl implements PaymentIntentService {
 
     private Mono<Void> cacheIntentResponse(String cacheKey, CreateIntentResponse createIntentResponse) {
         return reactiveRedisTemplate.opsForValue()
-            .setIfAbsent(cacheKey, createIntentResponse, IDEMPOTENCY_TTL)
+            .setIfAbsent(cacheKey, createIntentResponse, lockProps.getTtl())
             .doOnError(err -> logger.error("An error occurred while writing idempotencyKey to redis.", err))
             .then();
     }
